@@ -34,6 +34,311 @@ XHT用于代码扫描（参考QtMoc），通过宏标记来完成类型的自动
 > - XHT不易出错，只需定义生成规则即可。
 > - 原类改动时，XHT会自动同步附加代码的改动，而无需手动更改
 
+## AHT工作方式
+
+# AxRttr
+
+使用C++标准库 + RTTR 模仿 UE 的反射机制
+
+## Build
+
+使用以下方式均可完成构建：
+
+- CMake.exe
+- CMake GUI
+- Visual Studio open CMakeLists.txt
+- Qt Creator open CMakeLists.txt
+
+## 项目结构
+
+- AxHeaderTool：头文件工具，用于扫描、解析、生成代码文件。
+  - AxKeyGen：用于生成头文件工具中关键字的快速查找表
+- Examples：测试Demo
+- [RTTR](https://github.com/rttrorg/rttr)：一个开源的C++反射框架
+
+## Example解读
+
+工程名：AxRttrExample
+
+该样例用于测试已
+
+### 文件说明
+
+- Defines.h：定义宏，这些宏标记将会被AxHeaderTool捕获
+
+  ```C++
+  #define AxCLASS                     //该宏写在class前，能让这个类被捕获，自动生成反射代码
+  #define AxINVOKABLE                 //该宏写在函数前，能生成这个函数的反射代码
+  #define AxPROPERTY(...)             //该宏写在变量前，能让这个变量被反射
+  
+  #define GENERATED_BODY
+  #define AxGEN_ENTRY GENERATED_BODY  //代码入口，头文件工具将在生成的*.gen.h中生成GENERATED_BODY的定义，依此来动态修改头文件的代码
+  
+  //测试宏，用于测试头文件工具是否能展开宏，并生成附加代码
+  #define MACRO_ClASS AxCLASS class MacroClass { \
+      public:\
+              AxGEN_ENTRY \
+              AxPROPERTY() int x; \
+      };
+  ```
+
+- header.hxx：测试文件，该文件中定义了类`TestClass`，用于测试头文件是否能够正确扫描文件并生成附加代码。
+
+  - 自动生成的文件：
+
+    - header.gen.h：利用宏`GENERATED_BODY`生成反射注册函数的定义
+
+      ````
+      #define GENERATED_BODY static void registerClass();` `
+      ````
+
+    - header.gen.cpp：生成反射注册函数的实现
+
+- main.cpp：测试`TestClass`的反射功能能否正常使用。
+
+
+
+## AxHeaderTool
+
+AxHeaderTool是一个单独的命令行工具，其参数格式如下：
+
+```
+AxHeadeTool ${input_file} -o ${output_dir} 
+Options:
+-i include_dir:输入文件的包含路径
+-ohi output_header_include_file: 输出头文件（*.gen.h  ）的#include列表
+-osi output_source_include_file: 输出头文件（*.gen.cpp）的#include列表
+```
+
+该工具可扫描文件，并搜集其中的符号信息，生成新的文件。
+
+### 处理过程
+
+![Studio4.0.0单帧处理流程分析](C:\Users\fuxinghao879\Downloads\Studio4.0.0单帧处理流程分析 (1).png)
+
+### 自定义过程
+
+#### 定义关键字
+
+HeaderTool 通过使用关键字查找表高效地将文件内容解析为符号串，其中表的内容位于文件`Keywords.inl`中，该表是通过工程`AxGenKey`自动生成的，工程中定义了AxHeaderTool中所有使用的关键字。
+
+```C++
+static const Keyword pp_keywords[] = {...}   //预处理的关键字	
+static const Keyword keywords[] = {
+	{ "<", "LANGLE" },
+	{ ">", "RANGLE" },
+	...
+	
+	{ "AxCLASS","AX_CLASS_TOKEN"},
+	{ "AxGEN_ENTRY","AX_GEN_ENTRY_TOKEN"},
+	{ "AxINVOKABLE","AX_INVOKABLE_TOKEN"},
+	{ "AxENUM","AX_ENUM_TOKEN"},
+	{ "AxPROPERTY","AX_PROPERTY_TOKEN"},
+	...
+	};
+```
+
+关键字包含两个参数，以`{ "AxCLASS","AX_CLASS_TOKEN"}`为例，`AxCLASS`表示代码文件中的确切符号，`AX_CLASS_TOKEN`对应AxHeaderTool中使用的枚举，而枚举的定义则位于AxHeaderTool的`Token.h`文件中：
+
+```C++
+#define FOR_ALL_TOKENS(F) \
+    F(NOTOKEN) \
+    F(IDENTIFIER) \
+    ...
+    F(AX_CLASS_TOKEN) \
+    F(AX_GEN_ENTRY_TOKEN) \
+    F(AX_INVOKABLE_TOKEN) \
+    F(AX_ENUM_TOKEN) \
+    F(AX_PROPERTY_TOKEN) \
+    ...
+```
+
+所以要定义关键字，需要经历以下步骤：
+
+- 在**AxKeyGen工程**中新增关键字条目`｛符号，枚举元素｝`
+- 运行**AxKeyGen工程**将会在**AxHeaderTool**的代码目录下自动生成`Keywords.inl`
+- 在**AxHeaderTool工程**的`Token.h`文件中定义`枚举元素`
+
+#### 编写搜集器
+
+无需关心**FileParser**过程，我们唯一要注意的是**SymbolParser**的`bool parse(FileDataDef&, const Symbols&)`函数。
+
+parser中switch的主要层次结构如下：
+
+- 顶层switch：搜集文件全局信息
+  - namespace：搜集命名空间的信息
+    - ...
+  - class/struct：搜集类的信息
+    - ...
+  - ...
+
+查阅代码可以看到class中包含了 ` case AX_INVOKABLE_TOKEN`和`case AX_PROPERTY_TOKEN`。
+
+以`AX_PROPERTY_TOKEN`为例，它的作用是完成以下格式的变量标记：
+
+```
+AxPROPERTY(GET getX SET setX)	//其中 GET 和 SET 指定了该变量的get函数和set函数 
+int var;
+```
+
+回到**SymbolParser**，可以发现该case其实调用了函数`parseAxProperty()`：
+
+```c++
+case AX_PROPERTY_TOKEN:
+    parseAxProperty(&def);
+    break;
+```
+
+函数的定义如下：
+
+```c++
+void SymbolParser::parseAxProperty(ClassDef* def)
+{
+    PropertyDef axVarDef;				//定义Property的数据结构
+    next(LPAREN);						//移动到下一个符号并判断是否是左括号
+    while (test(IDENTIFIER)) {	    	//判断是不是标识符（非关键字）
+        std::string type = lexem(); 	//获取符号字符串
+        if (type == "GET") {			//判断得到的字符GET还是SET
+            next();						//移动到下一个符号
+            axVarDef.getter = lexem();  //保存符号
+        }
+        else if (type == "SET") {
+            next();	
+            axVarDef.setter = lexem();
+        }
+    }
+    next(RPAREN);						//移动到下一个符号并判断是否是右括号
+    axVarDef.type = parseType();		//解析变量类型
+    next(IDENTIFIER);					//移动到下一个符号并判断是不是标识符
+    axVarDef.name = lexem();			//获取变量名
+    until(SEMIC);						//往后移动，直到匹配到分号
+    def->propertyList.push_back(axVarDef);	//将该Property添加到类的数据结构中
+}
+```
+
+所有的数据结构均定义在`DataDef.h`文件中
+
+因此，如果要完成信息的搜集，一般要经历如下步骤：
+
+- 在`DataDef.h`定义想要搜集的数据
+
+- 在`SymbolParser::parser`中合适的地方添加case
+
+- 编写符号解析函数，借助**Parser**提供的便捷方法，完成信息的搜集
+
+  - 基础函数
+
+    ```c++
+    class ParserBase{
+        inline bool hasNext() const { return (mIndex < mSymbols.size()); }
+        inline Token next() { if (mIndex >= mSymbols.size()) return NOTOKEN; return mSymbols.at(mIndex++).token; }
+        inline Token peek() { if (mIndex >= mSymbols.size()) return NOTOKEN; return mSymbols.at(mIndex).token; }
+        bool test(Token);
+        void next(Token);
+        void next(Token, const char* msg);
+        inline void prev() { --mIndex; }
+        inline Token lookup(int k = 1);
+        inline const Symbol& symbol_lookup(int k = 1) { return mSymbols.at(mIndex - 1 + k); }
+        inline Token token() { return mSymbols.at(mIndex - 1).token; }
+        inline std::string lexem() { return mSymbols.at(mIndex - 1).lexem(); }
+        inline std::string unquotedLexem() { return mSymbols.at(mIndex - 1).unquotedLexem(); }
+        inline const Symbol& symbol() { return mSymbols.at(mIndex - 1); }
+    
+        void error(int rollback);
+        void error(const char* msg = nullptr);
+        void warning(const char* = nullptr);
+        void note(const char* = nullptr);
+    };
+    ```
+
+  - 工具函数
+
+    ```C++
+    class SymbolParser : public ParserBase{
+        Type parseType();
+        bool parseEnum(EnumDef* def);
+        bool parseFunction(FunctionDef* def, bool inMacro = false);
+        bool parseMaybeFunction(const ClassDef* cdef, FunctionDef* def);
+        void parseFunctionArguments(FunctionDef* def);
+        std::string lexemUntil(Token);
+        bool until(Token);
+    ```
+
+#### 生成附加代码
+
+附加代码的生成位于**FileGenerator**中
+
+打开`FileGenerator.cpp`，能会发现附加代码生成只是简单的通过fprintf向文件中写入数据：
+
+```C++
+bool FileGenerator::generateHeader(){
+    FILE* out;
+    std::filesystem::path outputPath(fileData->outputDir);
+    outputPath.append(std::filesystem::path(fileData->inputFilename).stem().string() + ".gen.h");
+    if (fopen_s(&out, outputPath.string().c_str(), "w") != 0) {
+        return false;
+    }
+    for (auto& it : fileData->outputHeaderIncludeFiles) {
+        fprintf(out, "#include %s\n", it.c_str());
+    }
+    fprintf(out, "#undef GENERATED_BODY \n");
+    fprintf(out, "#define GENERATED_BODY static void registerClass(); \n");
+    fputs("", out);
+    fclose(out);
+    return true;
+}
+```
+
+所以该阶段只需根据搜集到的信息写入代码即可。
+
+
+
+## 自动构建
+
+有了**AxHeaderTool**，只能手动通过命令行来处理文件，如果想在项目中能够自动调用**AxHeaderTool**来处理代码文件，该怎么办呢？
+
+**AxRttr**的**CMakeLists.txt**中对此进行了实现：
+
+```cmake
+function(target_axon_warp PROJECT_TARGET INPUT_FILE_PATH)                        #target_axon_warp(target,file)
+    get_filename_component(INPUT_FILE_NAME ${INPUT_FILE_PATH} NAME_WE)      #获取原文件的文件名（无后缀）
+
+    set(OUTPUT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/AutoGenFiles/${INPUT_FILE_NAME}.gen.h)      #生成头文件的路径
+    set(OUTPUT_SOURCE ${CMAKE_CURRENT_BINARY_DIR}/AutoGenFiles/${INPUT_FILE_NAME}.gen.cpp)    #生成源文件的路径
+
+    add_custom_command(
+        OUTPUT ${OUTPUT_SOURCE}
+        COMMAND AxHeaderTool ${CMAKE_CURRENT_SOURCE_DIR}/${INPUT_FILE_PATH} -o AutoGenFiles  #命令行指令
+        DEPENDS ${INPUT_FILE_PATH})            #指定输出文件依赖原文件，这样原文件变动时，该文件也会随之变动
+        set_property(TARGET ${PROJECT_TARGET} APPEND PROPERTY SOURCES ${OUTPUT_SOURCE})  #将生成的文件添加到target的代码资源中
+    source_group("Generated Files" FILES ${OUTPUT_HEADER} ${OUTPUT_SOURCE})              #将生成的代码放到Generated Files组中
+endfunction()
+```
+
+该函数能对单一文件进行处理，自动生成附加代码并参与项目的构建。
+
+
+
+那是否能完成像UE或者Qt的那样，检测到代码中包含某些符号自动调用HeaderTool呢？答案是肯定的，cmake提供了以下函数可用于查找是否代码文件中是否包含某些符号：
+
+[**check_cxx_symbol_exists**](https://cmake.org/cmake/help/latest/module/CheckCXXSymbolExists.html)
+
+但实际上这个过程是比较低效的，需要遍历整个文件，比较好的办法是通过文件后缀标识哪些文件需要被HeaderTool处理，AxRttr实现了以下函数来完成效果
+
+```cmake
+function(target_axon_auto PROJECT_TARGET)
+    get_target_property(TARGET_SOURCES ${PROJECT_TARGET} SOURCES)
+    message(WARNING "FILES ${TARGET_SOURCES}")
+    foreach(FILE ${TARGET_SOURCES})
+        get_filename_component(FILE_EXT ${FILE} EXT)      #获取原文件的文件名（无后缀）
+        if(FILE_EXT STREQUAL ".hxx")
+            target_axon_warp(${PROJECT_TARGET} ${FILE})
+        endif()
+        message(WARNING "TEST ${FILE_EXT}")
+    endforeach()
+endfunction()
+```
+
 #### 一些问题
 
 ##### 继承
